@@ -1,11 +1,12 @@
 ﻿using Microsoft.Extensions.Logging;
 using N4313.Enums;
+using N4313.Interfaces;
 using System.IO.Ports;
 using System.Text;
 
 namespace N4313;
 
-public class N4313
+public class N4313: IBarcodeScanner
 {
   public event EventHandler<string>? OnGoodRead;
   private const string COMMAND_PREFIX = "\x16" + "M" + "\x0D";
