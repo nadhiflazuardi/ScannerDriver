@@ -12,7 +12,7 @@ public class N4313
   private const string ACTIVATE_ENGINE_COMMAND = "\x16" + "T" + "\x0D";
   private const string DEACTIVATE_ENGINE_COMMAND = "\x16" + "U" + "\x0D";
   private readonly StringBuilder _barcodeBuffer = new();
-  private EScannerMode _currentMode = EScannerMode.Trigger;
+  private EScannerMode _currentMode;
   private TaskCompletionSource<string>? _tcs;
   private CancellationTokenSource? _listenerCts;
   private readonly ILogger<N4313> _logger;
@@ -20,7 +20,7 @@ public class N4313
 
   private SerialPort _serialPort = new()
   {
-    PortName = "/dev/ttyV0",
+    PortName = "/dev/serial0",
     BaudRate = 9600,
     DataBits = 8,
     Parity = Parity.None,
@@ -275,6 +275,19 @@ public class N4313
       }
 
       char ch = (char)buffer[0];
+
+      if (ch == '\x06')
+      {
+        OnResponseReceived(ECommandResponse.ACK);
+      }
+      else if (ch == '\x15')
+      {
+        OnResponseReceived(ECommandResponse.NAK);
+      }
+      else if (ch == '\x05')
+      {
+        OnResponseReceived(ECommandResponse.ENQ);
+      }
 
       if (ch == '\r')
       {
