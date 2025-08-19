@@ -19,7 +19,7 @@ public class N4313
 
   private SerialPort _serialPort = new()
   {
-    PortName = "/dev/ttyV0",
+    PortName = "/dev/serial0",
     BaudRate = 9600,
     DataBits = 8,
     Parity = Parity.None,
@@ -168,7 +168,7 @@ public class N4313
           OnResponseReceived(ECommandResponse.ENQ);
         }
 
-        if (ch == '\r' || ch == '\n')
+        if (ch == '\r')
         {
           string line = _barcodeBuffer.ToString();
           _barcodeBuffer.Clear();
@@ -189,6 +189,12 @@ public class N4313
           _logger.LogTrace("Appending char '{Char}' to buffer.", ch);
           _barcodeBuffer.Append(ch);
         }
+
+        if (ch == '!' || ch == '.' || ch == '\n')
+        {
+          _logger.LogTrace("Punctuation detected. Clearing buffer.");
+          _barcodeBuffer.Clear();
+        }
       }
     }
     catch (Exception ex)
@@ -204,7 +210,6 @@ public class N4313
   private void OnResponseReceived(ECommandResponse commandResponse)
   {
     string response = _barcodeBuffer.ToString();
-    _barcodeBuffer.Clear();
 
     _logger.LogDebug("Response of type {type} received: {response}", commandResponse, response);
   }
