@@ -14,13 +14,12 @@ public class N4313
   private readonly StringBuilder _barcodeBuffer = new();
   private EScannerMode _currentMode;
   private TaskCompletionSource<string>? _tcs;
-  private CancellationTokenSource? _listenerCts;
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
 
   private SerialPort _serialPort = new()
   {
-    PortName = "/dev/serial0",
+    PortName = "/dev/ttyV0",
     BaudRate = 9600,
     DataBits = 8,
     Parity = Parity.None,
@@ -119,7 +118,6 @@ public class N4313
       _logger.LogDebug("Sending command '{Command}' for mode {Mode}", message, mode);
       await SendCommandAsync(message, cts.Token);
 
-      OnModeChanged(mode);
       _currentMode = mode;
 
       _logger.LogInformation("Scanner mode successfully changed to {Mode}", mode);
@@ -150,12 +148,6 @@ public class N4313
 
   private void OnDataReceived(object? sender, SerialDataReceivedEventArgs e)
   {
-    if (_currentMode == EScannerMode.Continuous)
-    {
-      _logger.LogDebug("Data received event ignored because scanner is in Continuous mode.");
-      return;
-    }
-
     try
     {
       while (_serialPort.BytesToRead > 0)
@@ -183,7 +175,14 @@ public class N4313
 
           _logger.LogInformation("Complete barcode received: {Barcode}", line);
 
-          _tcs?.TrySetResult(line);
+          if (_currentMode == EScannerMode.Trigger)
+          {
+            _tcs?.TrySetResult(line);
+          }
+          else if (_currentMode == EScannerMode.Continuous)
+          {
+            OnGoodRead?.Invoke(this, line);
+          }
         }
         else
         {
@@ -195,7 +194,10 @@ public class N4313
     catch (Exception ex)
     {
       _logger.LogError(ex, "Error while processing data from serial port.");
-      throw;
+      if (_currentMode == EScannerMode.Trigger)
+      {
+        _tcs?.TrySetException(ex);
+      }
     }
   }
 
@@ -258,71 +260,6 @@ public class N4313
     catch (Exception ex)
     {
       throw new InvalidOperationException("Failed to send command to scanner.", ex);
-    }
-  }
-
-  private async Task ListenLoop(CancellationToken cancellationToken)
-  {
-    var buffer = new byte[1];
-    while (true)
-    {
-      cancellationToken.ThrowIfCancellationRequested();
-
-      int bytesRead = await _serialPort.BaseStream.ReadAsync(buffer, 0, 1, cancellationToken);
-      if (bytesRead == 0)
-      {
-        continue;
-      }
-
-      char ch = (char)buffer[0];
-
-      if (ch == '\x06')
-      {
-        OnResponseReceived(ECommandResponse.ACK);
-      }
-      else if (ch == '\x15')
-      {
-        OnResponseReceived(ECommandResponse.NAK);
-      }
-      else if (ch == '\x05')
-      {
-        OnResponseReceived(ECommandResponse.ENQ);
-      }
-
-      if (ch == '\r')
-      {
-        if (_barcodeBuffer.Length > 0)
-        {
-          string barcode = _barcodeBuffer.ToString();
-          _barcodeBuffer.Clear();
-          OnGoodRead?.Invoke(this, barcode);
-        }
-      }
-      else
-      {
-        _barcodeBuffer.Append(ch);
-      }
-    }
-  }
-
-  private void OnModeChanged(EScannerMode mode)
-  {
-    if (mode == EScannerMode.Trigger)
-    {
-      _listenerCts?.Cancel();
-
-      return;
-    }
-
-    _listenerCts = new CancellationTokenSource();
-
-    try
-    {
-      Task.Run(() => ListenLoop(_listenerCts.Token));
-    }
-    catch
-    {
-      throw new InvalidOperationException("Failed to start listening to serial port.");
     }
   }
 }
