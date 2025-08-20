@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using System.IO.Ports;
+using Microsoft.Extensions.Logging;
 using N4313;
 using N4313.Enums;
 
@@ -21,7 +22,19 @@ class Program
         });
 
     var logger = loggerFactory.CreateLogger<N4313.N4313>();
-    _scanner = new N4313.N4313(logger);
+
+    SerialPort serialPort = new()
+    {
+      PortName = "/dev/serial0",
+      BaudRate = 9600,
+      DataBits = 8,
+      Parity = Parity.None,
+      StopBits = StopBits.One,
+      Handshake = Handshake.None,
+    };
+
+
+    _scanner = new N4313.N4313(logger, serialPort);
 
     // Subscribe to continuous mode events
     _scanner.OnGoodRead += (sender, barcode) =>

@@ -18,19 +18,12 @@ public class N4313: IBarcodeScanner
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
 
-  private SerialPort _serialPort = new()
-  {
-    PortName = "/dev/serial0",
-    BaudRate = 9600,
-    DataBits = 8,
-    Parity = Parity.None,
-    StopBits = StopBits.One,
-    Handshake = Handshake.None,
-  };
+  private SerialPort _serialPort;
 
-  public N4313(ILogger<N4313> logger)
+  public N4313(ILogger<N4313> logger, SerialPort serialPort)
   {
     _logger = logger;
+    _serialPort = serialPort;
     _serialPort.DataReceived += OnDataReceived;
   }
 
