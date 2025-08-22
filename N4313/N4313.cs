@@ -14,6 +14,7 @@ public class N4313: IBarcodeScanner
   private const string DEACTIVATE_ENGINE_COMMAND = "\x16" + "U" + "\x0D";
   private readonly StringBuilder _barcodeBuffer = new();
   private EScannerMode _currentMode;
+  public EScannerMode CurrentMode => _currentMode;
   private TaskCompletionSource<string>? _tcs;
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
@@ -45,13 +46,13 @@ public class N4313: IBarcodeScanner
 
   public async Task<string> Scan(CancellationToken cancellationToken)
   {
-    await _semaphore.WaitAsync(cancellationToken);
-
     if (_currentMode == EScannerMode.Continuous)
     {
       _logger.LogWarning("Scan attempted in Continuous mode. Operation not allowed.");
       throw new InvalidOperationException("Can't trigger scan in continous mode!");
     }
+
+    await _semaphore.WaitAsync();
 
     cancellationToken.ThrowIfCancellationRequested();
 
@@ -85,13 +86,13 @@ public class N4313: IBarcodeScanner
 
   public async Task SetMode(EScannerMode mode)
   {
-    await _semaphore.WaitAsync();
-
     if (_currentMode == mode)
     {
       _logger.LogInformation("Scanner already in {Mode} mode, no action taken.", mode);
       return;
     }
+
+    await _semaphore.WaitAsync();
 
     try
     {
