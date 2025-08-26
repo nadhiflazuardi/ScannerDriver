@@ -1,12 +1,13 @@
 ﻿using Microsoft.Extensions.Logging;
 using N4313.Enums;
 using N4313.Interfaces;
-using System.IO.Ports;
+using System.IO.Pipelines;
 using System.Text;
+using System.Buffers;
 
 namespace N4313;
 
-public class N4313: IBarcodeScanner
+public class N4313 : IBarcodeScanner
 {
   public event EventHandler<string>? OnGoodRead;
   private const string COMMAND_PREFIX = "\x16" + "M" + "\x0D";
@@ -15,33 +16,22 @@ public class N4313: IBarcodeScanner
   private readonly StringBuilder _barcodeBuffer = new();
   private EScannerMode _currentMode;
   public EScannerMode CurrentMode => _currentMode;
-  private TaskCompletionSource<string>? _tcs;
+  private CancellationTokenSource? _listenerCts;
+  private Task? _listenerTask;
+  private TaskCompletionSource<string>? _scanTcs;
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
+  protected PipeWriter Writer { get; }
+  protected PipeReader Reader { get; }
 
-  private SerialPort _serialPort;
-
-  public N4313(ILogger<N4313> logger, SerialPort serialPort)
+  public N4313(ILogger<N4313> logger, IDuplexPipe pipe)
   {
     _logger = logger;
-    _serialPort = serialPort;
-    _serialPort.DataReceived += OnDataReceived;
-  }
+    Reader = pipe.Input;
+    Writer = pipe.Output;
 
-  public void Connect()
-  {
-    if (!_serialPort.IsOpen)
-    {
-      _serialPort.Open();
-    }
-  }
-
-  public void Disconnect()
-  {
-    if (_serialPort.IsOpen)
-    {
-      _serialPort.Close();
-    }
+    _listenerCts = new CancellationTokenSource();
+    _listenerTask = Task.Run(() => ReadLoopAsync(_listenerCts.Token));
   }
 
   public async Task<string> Scan(CancellationToken cancellationToken)
@@ -60,13 +50,20 @@ public class N4313: IBarcodeScanner
     {
       _logger.LogInformation("Starting scan...");
 
-      EnsureConnected();
-      _logger.LogDebug("Connection ensured, sending scan command.");
+      _scanTcs = new TaskCompletionSource<string>();
 
-      var result = await SendCommandAndListenAsync(ACTIVATE_ENGINE_COMMAND, cancellationToken);
+      using var Registration = cancellationToken.Register(() =>
+      {
+        _scanTcs?.TrySetCanceled(cancellationToken);
+      });
 
-      _logger.LogInformation("Scan completed successfully. Result: {Result}", result);
-      return result;
+
+      await SendCommandAsync(ACTIVATE_ENGINE_COMMAND, cancellationToken);
+
+      string scanResult = await _scanTcs.Task;
+
+      _logger.LogInformation("Scan completed successfully. Result: {Result}", scanResult);
+      return scanResult;
     }
     catch (OperationCanceledException)
     {
@@ -98,7 +95,6 @@ public class N4313: IBarcodeScanner
     {
       _logger.LogInformation("Attempting to set scanner mode to {Mode}", mode);
 
-      EnsureConnected();
       _logger.LogDebug("Connection ensured, preparing mode change command.");
 
       string message = mode switch
@@ -133,133 +129,91 @@ public class N4313: IBarcodeScanner
     }
   }
 
-  private void EnsureConnected()
-  {
-    if (!_serialPort.IsOpen)
-    {
-      throw new InvalidOperationException("ScannerDriver is not connected. Call Connect() before using this method.");
-    }
-  }
-
-  private void OnDataReceived(object? sender, SerialDataReceivedEventArgs e)
-  {
-    try
-    {
-      while (_serialPort.BytesToRead > 0)
-      {
-        char ch = (char)_serialPort.ReadChar();
-        _logger.LogTrace("Read char: {Char} (0x{Hex})", ch, ((int)ch).ToString("X2"));
-
-        if (ch == '\x06')
-        {
-          OnResponseReceived(ECommandResponse.ACK);
-        }
-        else if (ch == '\x15')
-        {
-          OnResponseReceived(ECommandResponse.NAK);
-        }
-        else if (ch == '\x05')
-        {
-          OnResponseReceived(ECommandResponse.ENQ);
-        }
-
-        if (ch == '\r')
-        {
-          string line = _barcodeBuffer.ToString();
-          _barcodeBuffer.Clear();
-
-          _logger.LogInformation("Complete barcode received: {Barcode}", line);
-
-          if (_currentMode == EScannerMode.Trigger)
-          {
-            _tcs?.TrySetResult(line);
-          }
-          else if (_currentMode == EScannerMode.Continuous)
-          {
-            OnGoodRead?.Invoke(this, line);
-          }
-        }
-        else
-        {
-          _logger.LogTrace("Appending char '{Char}' to buffer.", ch);
-          _barcodeBuffer.Append(ch);
-        }
-
-        if (ch == '!' || ch == '.' || ch == '\n')
-        {
-          _logger.LogTrace("Punctuation detected. Clearing buffer.");
-          _barcodeBuffer.Clear();
-        }
-      }
-    }
-    catch (Exception ex)
-    {
-      _logger.LogError(ex, "Error while processing data from serial port.");
-      if (_currentMode == EScannerMode.Trigger)
-      {
-        _tcs?.TrySetException(ex);
-      }
-    }
-  }
-
-  private void OnResponseReceived(ECommandResponse commandResponse)
-  {
-    string response = _barcodeBuffer.ToString();
-
-    _logger.LogDebug("Response of type {type} received: {response}", commandResponse, response);
-  }
-
-  private async Task<string> SendCommandAndListenAsync(string command, CancellationToken cancellationToken)
-  {
-    try
-    {
-      _logger.LogInformation("Sending command: {Command}", command);
-
-      _tcs = new TaskCompletionSource<string>();
-
-      using var registration = cancellationToken.Register(() =>
-      {
-        _logger.LogWarning("Command '{Command}' was cancelled.", command);
-        _tcs?.TrySetCanceled(cancellationToken);
-      });
-
-      string fullCommand = command;
-      byte[] commandBytes = Encoding.ASCII.GetBytes(fullCommand);
-
-      _logger.LogDebug("Writing {Length} bytes to serial port: {Bytes}", commandBytes.Length, BitConverter.ToString(commandBytes));
-      await _serialPort.BaseStream.WriteAsync(commandBytes, 0, commandBytes.Length, cancellationToken);
-
-      string response = await _tcs.Task;
-
-      _logger.LogInformation("Received response for command '{Command}': {Response}", command, response);
-      return response;
-    }
-    catch (OperationCanceledException)
-    {
-      _logger.LogWarning("Command '{Command}' was cancelled by caller.", command);
-      throw;
-    }
-    catch (Exception ex)
-    {
-      _logger.LogError(ex, "Error while sending command '{Command}'", command);
-      _tcs = null;
-      throw new Exception("An error occurred while sending command.", ex);
-    }
-  }
-
   private async Task SendCommandAsync(string command, CancellationToken cancellationToken)
   {
     try
     {
-      EnsureConnected();
-
       string fullCommand = command;
       byte[] commandBytes = Encoding.ASCII.GetBytes(fullCommand);
-      await _serialPort.BaseStream.WriteAsync(commandBytes, 0, commandBytes.Length, cancellationToken);
+      await Writer.WriteAsync(commandBytes, cancellationToken);
     }
     catch (Exception ex)
     {
       throw new InvalidOperationException("Failed to send command to scanner.", ex);
+    }
+  }
+
+  private async Task ReadLoopAsync(CancellationToken ct)
+  {
+    try
+    {
+      while (!ct.IsCancellationRequested)
+      {
+        var result = await Reader.ReadAsync(ct);
+        var buffer = result.Buffer;
+
+        SequencePosition? position = buffer.PositionOf((byte)'\n');
+        while (position != null)
+        {
+          var line = buffer.Slice(0, position.Value);
+          ProcessLine(line); // interpret and handle
+
+          // Move buffer past the delimiter so we can look for more
+          buffer = buffer.Slice(buffer.GetPosition(1, position.Value));
+          position = buffer.PositionOf((byte)'\n');
+        }
+
+        // Tell PipeReader how much have been consumed/examined
+        Reader.AdvanceTo(buffer.Start, buffer.End);
+
+        if (result.IsCompleted)
+        {
+          break;
+        }
+      }
+    }
+    catch (Exception ex)
+    {
+      _logger.LogError(ex, "Error in ReadLoopAsync");
+    }
+  }
+
+  private void ProcessLine(ReadOnlySequence<byte> lineBytes)
+  {
+    var text = Encoding.ASCII.GetString(lineBytes.ToArray()).Trim();
+
+    // Example: Different actions depending on mode
+    if (_currentMode == EScannerMode.Trigger)
+    {
+      _scanTcs?.TrySetResult(text);
+      _scanTcs = null;
+    }
+    else if (_currentMode == EScannerMode.Continuous)
+    {
+      OnGoodRead?.Invoke(this, text);
+    }
+    // You can add more protocol-specific parsing here: ACK/NAK, error codes, etc.
+  }
+
+  public async ValueTask DisposeAsync()
+  {
+    _listenerCts!.Cancel();
+
+    try
+    {
+      await _listenerTask!;
+    }
+    catch (OperationCanceledException)
+    {
+
+    }
+    finally
+    {
+
+      await Writer.CompleteAsync();
+      await Reader.CompleteAsync();
+
+      _listenerCts.Dispose();
     }
   }
 }
