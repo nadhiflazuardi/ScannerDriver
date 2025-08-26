@@ -13,7 +13,8 @@ public class N4313 : IBarcodeScanner
   private const string COMMAND_PREFIX = "\x16" + "M" + "\x0D";
   private const string ACTIVATE_ENGINE_COMMAND = "\x16" + "T" + "\x0D";
   private const string DEACTIVATE_ENGINE_COMMAND = "\x16" + "U" + "\x0D";
-  private readonly StringBuilder _barcodeBuffer = new();
+  private readonly string CONTINUOUS_SCAN_MODE_COMMAND = COMMAND_PREFIX + "pappm3!";
+  private readonly string TRIGGER_SCAN_MODE_COMMAND = COMMAND_PREFIX + "aosdft!";
   private EScannerMode _currentMode;
   public EScannerMode CurrentMode => _currentMode;
   private CancellationTokenSource? _listenerCts;
@@ -99,8 +100,8 @@ public class N4313 : IBarcodeScanner
 
       string message = mode switch
       {
-        EScannerMode.Continuous => COMMAND_PREFIX + "pappm3!",
-        EScannerMode.Trigger => COMMAND_PREFIX + "aosdft!",
+        EScannerMode.Continuous => CONTINUOUS_SCAN_MODE_COMMAND,
+        EScannerMode.Trigger => TRIGGER_SCAN_MODE_COMMAND,
         _ => throw new ArgumentOutOfRangeException(nameof(mode))
       };
 
