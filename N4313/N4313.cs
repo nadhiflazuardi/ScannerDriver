@@ -20,7 +20,6 @@ public class N4313 : IBarcodeScanner
   private CancellationTokenSource? _listenerCts;
   private Task? _listenerTask;
   private TaskCompletionSource<string>? _scanTcs;
-  private TaskCompletionSource? _commandTcs;
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
   protected PipeWriter _writer;
@@ -79,6 +78,7 @@ public class N4313 : IBarcodeScanner
     }
     finally
     {
+      _scanTcs = null;
       _semaphore.Release();
     }
   }
@@ -101,11 +101,6 @@ public class N4313 : IBarcodeScanner
 
       _logger.LogDebug("Connection ensured, preparing mode change command.");
 
-      _commandTcs = new TaskCompletionSource();
-      using var Registration = cancellationToken.Register(() =>
-      {
-        _commandTcs?.TrySetCanceled(cancellationToken);
-      });
 
       string message = mode switch
       {
@@ -116,8 +111,6 @@ public class N4313 : IBarcodeScanner
 
       _logger.LogDebug("Sending command '{Command}' for mode {Mode}", message, mode);
       await SendCommandAsync(message, cancellationToken);
-
-      await _commandTcs.Task;
 
       _currentMode = mode;
 
@@ -161,20 +154,23 @@ public class N4313 : IBarcodeScanner
       {
         var result = await _reader.ReadAsync(ct);
         var buffer = result.Buffer;
+        var consumed = buffer.Start;
+        var examined = buffer.End;
 
-        SequencePosition? position = buffer.PositionOf((byte)'\n');
-        while (position != null)
+        // Look for line endings (\r, \n, or \r\n)
+        while (TryReadLine(ref buffer, out ReadOnlySequence<byte> line, out SequencePosition lineEnd))
         {
-          var line = buffer.Slice(0, position.Value);
-          ProcessLine(line); // interpret and handle
+          ProcessLine(line);
 
-          // Move buffer past the delimiter so we can look for more
-          buffer = buffer.Slice(buffer.GetPosition(1, position.Value));
-          position = buffer.PositionOf((byte)'\n');
+          // Update consumed to the position after the line ending
+          consumed = lineEnd;
+
+          // Update buffer to start from the consumed position
+          buffer = buffer.Slice(consumed);
         }
 
-        // Tell PipeReader how much have been consumed/examined
-        _reader.AdvanceTo(buffer.Start, buffer.End);
+        // Update the consumed position
+        _reader.AdvanceTo(consumed, examined);
 
         if (result.IsCompleted)
         {
@@ -192,14 +188,29 @@ public class N4313 : IBarcodeScanner
   {
     var text = Encoding.ASCII.GetString(lineBytes.ToArray()).Trim();
 
-    if (_currentMode == EScannerMode.Trigger)
+    // Skip empty lines
+    if (string.IsNullOrEmpty(text))
     {
-      _scanTcs?.TrySetResult(text);
-      _scanTcs = null;
+      return;
+    }
+
+    _logger.LogDebug("Received line: '{Text}' in mode: {Mode}", text, _currentMode);
+
+    if (_currentMode == EScannerMode.Trigger && _scanTcs != null)
+    {
+      _logger.LogDebug("Setting scan result: '{Text}'", text);
+      if (_scanTcs.TrySetResult(text))
+      {
+        _logger.LogDebug("Scan result successfully set");
+      }
     }
     else if (_currentMode == EScannerMode.Continuous)
     {
       OnGoodRead?.Invoke(this, text);
+    }
+    else
+    {
+      _logger.LogWarning("Received data '{Text}' but no active scan or wrong mode", text);
     }
   }
 
@@ -223,5 +234,22 @@ public class N4313 : IBarcodeScanner
 
       _listenerCts.Dispose();
     }
+  }
+
+  private static bool TryReadLine(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> line, out SequencePosition end)
+  {
+    var reader = new SequenceReader<byte>(buffer);
+
+    // Look for \r or \n
+    if (reader.TryReadTo(out ReadOnlySequence<byte> lineData, (byte)'\r', (byte)'\n', advancePastDelimiter: true))
+    {
+      line = lineData;
+      end = reader.Position;
+      return true;
+    }
+
+    line = default;
+    end = default;
+    return false;
   }
 }
