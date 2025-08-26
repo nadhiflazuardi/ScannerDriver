@@ -20,16 +20,17 @@ public class N4313 : IBarcodeScanner
   private CancellationTokenSource? _listenerCts;
   private Task? _listenerTask;
   private TaskCompletionSource<string>? _scanTcs;
+  private TaskCompletionSource? _commandTcs;
   private readonly ILogger<N4313> _logger;
   private readonly SemaphoreSlim _semaphore = new(1, 1);
-  protected PipeWriter Writer { get; }
-  protected PipeReader Reader { get; }
+  protected PipeWriter _writer;
+  protected PipeReader _reader;
 
-  public N4313(ILogger<N4313> logger, IDuplexPipe pipe)
+  public N4313(ILogger<N4313> logger, IDuplexPipe duplexPipe)
   {
     _logger = logger;
-    Reader = pipe.Input;
-    Writer = pipe.Output;
+    _reader = duplexPipe.Input;
+    _writer = duplexPipe.Output;
 
     _listenerCts = new CancellationTokenSource();
     _listenerTask = Task.Run(() => ReadLoopAsync(_listenerCts.Token));
@@ -82,7 +83,7 @@ public class N4313 : IBarcodeScanner
     }
   }
 
-  public async Task SetMode(EScannerMode mode)
+  public async Task SetMode(EScannerMode mode, CancellationToken cancellationToken)
   {
     if (_currentMode == mode)
     {
@@ -92,11 +93,19 @@ public class N4313 : IBarcodeScanner
 
     await _semaphore.WaitAsync();
 
+    cancellationToken.ThrowIfCancellationRequested();
+
     try
     {
       _logger.LogInformation("Attempting to set scanner mode to {Mode}", mode);
 
       _logger.LogDebug("Connection ensured, preparing mode change command.");
+
+      _commandTcs = new TaskCompletionSource();
+      using var Registration = cancellationToken.Register(() =>
+      {
+        _commandTcs?.TrySetCanceled(cancellationToken);
+      });
 
       string message = mode switch
       {
@@ -105,10 +114,10 @@ public class N4313 : IBarcodeScanner
         _ => throw new ArgumentOutOfRangeException(nameof(mode))
       };
 
-      using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-
       _logger.LogDebug("Sending command '{Command}' for mode {Mode}", message, mode);
-      await SendCommandAsync(message, cts.Token);
+      await SendCommandAsync(message, cancellationToken);
+
+      await _commandTcs.Task;
 
       _currentMode = mode;
 
@@ -136,7 +145,7 @@ public class N4313 : IBarcodeScanner
     {
       string fullCommand = command;
       byte[] commandBytes = Encoding.ASCII.GetBytes(fullCommand);
-      await Writer.WriteAsync(commandBytes, cancellationToken);
+      await _writer.WriteAsync(commandBytes, cancellationToken);
     }
     catch (Exception ex)
     {
@@ -150,7 +159,7 @@ public class N4313 : IBarcodeScanner
     {
       while (!ct.IsCancellationRequested)
       {
-        var result = await Reader.ReadAsync(ct);
+        var result = await _reader.ReadAsync(ct);
         var buffer = result.Buffer;
 
         SequencePosition? position = buffer.PositionOf((byte)'\n');
@@ -165,7 +174,7 @@ public class N4313 : IBarcodeScanner
         }
 
         // Tell PipeReader how much have been consumed/examined
-        Reader.AdvanceTo(buffer.Start, buffer.End);
+        _reader.AdvanceTo(buffer.Start, buffer.End);
 
         if (result.IsCompleted)
         {
@@ -183,7 +192,6 @@ public class N4313 : IBarcodeScanner
   {
     var text = Encoding.ASCII.GetString(lineBytes.ToArray()).Trim();
 
-    // Example: Different actions depending on mode
     if (_currentMode == EScannerMode.Trigger)
     {
       _scanTcs?.TrySetResult(text);
@@ -193,7 +201,6 @@ public class N4313 : IBarcodeScanner
     {
       OnGoodRead?.Invoke(this, text);
     }
-    // You can add more protocol-specific parsing here: ACK/NAK, error codes, etc.
   }
 
   public async ValueTask DisposeAsync()
@@ -211,8 +218,8 @@ public class N4313 : IBarcodeScanner
     finally
     {
 
-      await Writer.CompleteAsync();
-      await Reader.CompleteAsync();
+      await _writer.CompleteAsync();
+      await _reader.CompleteAsync();
 
       _listenerCts.Dispose();
     }
