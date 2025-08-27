@@ -116,8 +116,6 @@ public class N4313 : IBarcodeScanner
 
       await SendCommandAsync(message, cancellationToken);
 
-      await _commandTcs.Task.WaitAsync(cancellationToken);
-
       _currentMode = mode;
 
       _logger.LogInformation("Scanner mode successfully changed to {Mode}", mode);
@@ -158,7 +156,7 @@ public class N4313 : IBarcodeScanner
         var consumed = buffer.Start;
         var examined = buffer.End;
 
-        // Look for line endings (\r, \n, or \r\n)
+        // Look for line endings (\r, \n, !, .)
         while (TryReadLine(buffer, _commandTcs != null, out ReadOnlySequence<byte> line, out SequencePosition lineEnd))
         {
           // Update consumed to the position after the line ending
