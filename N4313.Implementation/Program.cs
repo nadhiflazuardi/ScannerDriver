@@ -2,11 +2,13 @@
 using Microsoft.Extensions.Logging;
 using N4313;
 using N4313.Enums;
+using N4313.Transports;
 
 namespace ScannerClient;
 
 class Program
 {
+  private const string _portName = "/dev/serial0";
   private static N4313.N4313? _scanner;
   private static bool _isRunning = true;
 
@@ -23,18 +25,9 @@ class Program
 
     var logger = loggerFactory.CreateLogger<N4313.N4313>();
 
-    SerialPort serialPort = new()
-    {
-      PortName = "/dev/serial0",
-      BaudRate = 9600,
-      DataBits = 8,
-      Parity = Parity.None,
-      StopBits = StopBits.One,
-      Handshake = Handshake.None,
-    };
+    SerialPortDuplexPipe serialPortDuplexPipe = new(_portName, 9600);
 
-
-    _scanner = new N4313.N4313(logger, serialPort);
+    _scanner = new N4313.N4313(logger, serialPortDuplexPipe);
 
     // Subscribe to continuous mode events
     _scanner.OnGoodRead += (sender, barcode) =>
@@ -46,18 +39,17 @@ class Program
     {
       // Connect to scanner
       Console.WriteLine("Connecting to scanner...");
-      _scanner.Connect();
       Console.WriteLine("✓ Connected successfully!");
 
       await ShowMainMenu();
     }
     catch (Exception ex)
     {
-      Console.WriteLine($"❌ Error: {ex.Message}");
+      Console.WriteLine($"Error: {ex.Message}");
     }
     finally
     {
-      _scanner?.Disconnect();
+      await _scanner.DisposeAsync();
       Console.WriteLine("Scanner disconnected. Press any key to exit.");
       Console.ReadKey();
     }
@@ -154,7 +146,7 @@ class Program
 
     try
     {
-      await _scanner!.SetMode(EScannerMode.Continuous);
+      await _scanner!.SetMode(EScannerMode.Continuous, CancellationToken.None);
       Console.WriteLine("✓ Continuous mode enabled!");
       Console.WriteLine("Scanner will now read barcodes automatically.");
       Console.WriteLine("Scanned barcodes will appear above.");
@@ -175,7 +167,7 @@ class Program
 
     try
     {
-      await _scanner!.SetMode(EScannerMode.Trigger);
+      await _scanner!.SetMode(EScannerMode.Trigger, CancellationToken.None);
       Console.WriteLine("✓ Trigger mode enabled!");
       Console.WriteLine("Use option 1 to perform single scans.");
     }
